@@ -1,0 +1,7 @@
+version: '3.8'
+services:
+  web_pages_fetcher:
+    build: .
+    tty: true
+    volumes:
+      - '.:/web_pages_fetcher'
