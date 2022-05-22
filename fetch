@@ -1,0 +1,90 @@
+#!/usr/bin/env ruby
+require 'nokogiri'
+require 'uri'
+require 'typhoeus'
+require 'cgi'
+
+class WebPagesFetcher
+  class APIError < StandardError; end
+
+  attr_reader :urls, :opt, :errors
+
+  def initialize(args = [])
+    @urls = args.uniq
+    @opt = @urls.first == "--metadata" ? @urls.shift : nil
+    @errors = []
+  end
+
+  def process
+    validate_input(urls, opt)
+    case opt
+    when "--metadata"
+      print_url_metadata
+    else
+      fetch_web_pages
+      raise APIError, @errors.join('; ') if @errors.any?
+    end
+  end
+
+  private
+
+  def validate_input(urls, opt)
+    raise ArgumentError, "Please indicate at least one url" if (opt == "--metadata" && urls.empty?) || (opt.nil? && urls.empty?)
+  end
+
+  def print_url_metadata
+    url = urls.first
+    file_name = define_file_name(url)
+    file = File.read(file_name)
+
+    print_metadata(file)
+  end
+
+  def fetch_web_pages
+    hydra = Typhoeus::Hydra.new(max_concurrency: 20)
+    urls.map do |url|
+      request = Typhoeus::Request.new(url)
+      setup_request_callback(request, url)
+      hydra.queue(request)
+    end
+    hydra.run
+  end
+
+  def touch_html_file(file_name, file_content)
+    File.open(file_name, "w") do |file|
+      doc = Nokogiri::HTML(file_content)
+      num_links = doc.css('a').map { |link| link['href'] }.compact.size
+      num_images = doc.css('img').size
+      time = Time.now.utc.to_i
+
+      doc.at('meta').before("<metadata site=#{file_name} num_links=#{num_links} num_images=#{num_images} last_fetch=#{time}>")
+      file.print(doc.to_html)
+    end
+  end
+
+  def setup_request_callback(request, url)
+    request.on_complete do |response|
+      if response.code == 200
+        file_name = define_file_name(url)
+        html_content = CGI.unescapeHTML(response.response_body)
+        touch_html_file(file_name, html_content)
+      else
+        @errors << "HTTP request failed: #{url} => #{response.code}/#{response.return_code}/#{response.return_message}"
+      end
+    end
+  end
+
+  def define_file_name(url)
+    URI.parse(url).host + ".html"
+  end
+
+  def print_metadata(file)
+    doc = Nokogiri::HTML(file)
+    doc.at("metadata").attributes.values.each do |att|
+      att.value = Time.at(att.value.to_i).utc.to_s if att.name == 'last_fetch'
+      puts att.name + ": " + att.value
+    end
+  end
+end
+
+WebPagesFetcher.new(ARGV).process
